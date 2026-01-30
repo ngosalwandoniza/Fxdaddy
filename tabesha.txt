@@ -1,0 +1,1863 @@
+//+------------------------------------------------------------------+
+//|                                                      Fxdaddy.mq5 |
+//|                        Copyright 2024, Fxdaddy Trading System   |
+//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2024, Fxdaddy Trading System"
+#property link      "https://www.mql5.com"
+#property version   "1.00"
+#property description "BTA Trading EA - Monitors BTA Optimal Trade Zone and BTA Sniper Entry indicators"
+
+//--- Input parameters
+input group "=== TRADING SETTINGS ==="
+input double InpLotSize = 0.01;                    // Lot Size (Manual) - Base lot size
+input double InpRiskPercent = 1.0;                 // Risk percent per trade (0.5-2.0 recommended)
+input bool InpUseDynamicLotSize = false;           // Use dynamic lot sizing based on risk
+input int InpMaxTrades = 10;                       // Maximum Concurrent Trades - Increased for better opportunities
+input double InpDailyLossLimit = 100.0;            // Daily Loss Limit ($) - Adjusted for higher volume
+input double InpMaxLossPerTrade = 10.0;            // Maximum Loss Per Trade ($) - Increased proportionally
+input int InpStopLoss = 15;                        // Stop Loss (pips) - Reduced for 1:3 RR
+input int InpTakeProfit = 45;                      // Take Profit (pips) - Increased for 1:3 RR
+input int InpMagicNumber = 12345;                  // Magic Number
+
+input group "=== ADVANCED RISK MANAGEMENT ==="
+input bool InpStopAfterStopLoss = true;             // Stop Trading After Stop Loss Hit
+input int InpMaxConsecutiveLosses = 3;              // Maximum Consecutive Losses
+input double InpMaxDrawdownPercent = 15.0;          // Maximum Drawdown (%)
+input bool InpStopAfterHighLoss = true;             // Stop Trading After High Loss
+input double InpHighLossThreshold = 50.0;           // High Loss Threshold ($)
+input int InpCooldownMinutes = 60;                 // Cooldown Period (minutes)
+
+input group "=== VOLATILITY INDICES ==="
+input bool InpTradeVol10 = true;                    // Trade Volatility 10 Index
+input bool InpTradeVol25 = true;                    // Trade Volatility 25 Index
+input bool InpTradeVol50 = true;                    // Trade Volatility 50 Index
+input bool InpTradeVol75 = false;                   // Trade Volatility 75 Index
+input bool InpTradeVol100 = false;                  // Trade Volatility 100 Index
+
+input group "=== VOLATILITY 1S INDICES ==="
+input bool InpTradeVol10_1s = false;                // Trade Volatility 10 (1s) Index
+input bool InpTradeVol25_1s = false;                // Trade Volatility 25 (1s) Index
+input bool InpTradeVol50_1s = false;                // Trade Volatility 50 (1s) Index
+input bool InpTradeVol75_1s = false;                // Trade Volatility 75 (1s) Index
+input bool InpTradeVol100_1s = false;               // Trade Volatility 100 (1s) Index
+
+input group "=== CRASH & BOOM INDICES ==="
+input bool InpTradeCrash500 = false;                // Trade Crash 500 Index
+input bool InpTradeCrash1000 = false;               // Trade Crash 1000 Index
+input bool InpTradeBoom500 = false;                 // Trade Boom 500 Index
+input bool InpTradeBoom1000 = false;                // Trade Boom 1000 Index
+input bool InpTradeCrash300 = false;                // Trade Crash 300 Index
+input bool InpTradeCrash600 = false;                // Trade Crash 600 Index
+input bool InpTradeCrash900 = false;                // Trade Crash 900 Index
+input bool InpTradeBoom300 = false;                 // Trade Boom 300 Index
+input bool InpTradeBoom600 = false;                 // Trade Boom 600 Index
+input bool InpTradeBoom900 = false;                 // Trade Boom 900 Index
+
+input group "=== STEP INDICES ==="
+input bool InpTradeStep = false;                    // Trade Step Index
+input bool InpTradeRangeBreak100 = false;          // Trade Range Break 100 Index
+input bool InpTradeRangeBreak200 = false;          // Trade Range Break 200 Index
+
+input group "=== TIME SETTINGS ==="
+input string InpStartTime = "00:00";               // Start Trading Time (00:00 = 24/7)
+input string InpEndTime = "23:59";                 // End Trading Time (23:59 = 24/7)
+input bool InpTradeOnFriday = true;                // Trade on Friday
+input bool InpTradeOnWeekend = true;               // Trade on Weekend (7 days)
+
+input group "=== BTA INDICATOR SETTINGS ==="
+input string InpBTAOptimalZone = "B.T.A Optimal Trade Zone v.1.0";  // BTA Optimal Trade Zone Indicator
+input string InpBTASniperEntry = "B.T.A Sniper Entry v.1.0";        // BTA Sniper Entry Indicator
+input string InpBTAPassword = "131f8e1f207002dab77feea8a77805455827ae08dd";  // BTA Password
+input int InpBTATextSize = 8;                       // BTA Text Size
+input int InpSignalBuffer = 1;                     // Signal Buffer (bars to check)
+input bool InpTestMode = false;                     // Test Mode (use random signals if indicators fail)
+input bool InpSkipFirstBar = true;                  // Skip previous closed bar at startup
+input int InpStartupDelayMinutes = 1;               // Minutes to delay trading after EA start
+
+input group "=== RISK MANAGEMENT ==="
+input bool InpUseTrailingStop = true;             // Use Trailing Stop - Enabled for profit protection
+input int InpTrailingStop = 15;                    // Trailing Stop (pips) - Increased distance
+input int InpTrailingStep = 5;                     // Trailing Step (pips)
+input bool InpCloseOnOpposite = true;              // Close on Opposite Signal
+input bool InpUseFixedRiskReward = true;           // Use fixed Risk:Reward
+input double InpRiskRewardReward = 3.0;            // Reward multiple (1:3 => 3.0)
+
+//--- Global variables
+double g_dailyProfit = 0.0;
+datetime g_lastTradeDate = 0;
+string g_tradingSymbols[];
+int g_signalBuffer = 0;
+ENUM_TIMEFRAMES g_chartTimeframe = PERIOD_CURRENT; // timeframe the EA is attached to (locked at init)
+datetime g_startTime = 0; // time when EA initialized
+//--- Per-symbol confirmation state
+bool g_waitingForConfirmation[]; // true when waiting for a confirming sniper outside the zone
+int g_waitingDirection[];        // 1 = buy, -1 = sell, 0 = none
+datetime g_lastProcessedBarTime[]; // last processed bar time per symbol to avoid duplicate handling
+bool g_seenInitialBar[]; // true when we have initialized the symbol's processed bar time (handles missing history on init)
+
+//--- Advanced Risk Management Variables
+bool g_stopTrading = false;                    // Global trading stop flag
+int g_consecutiveLosses = 0;                   // Consecutive losses counter
+double g_initialBalance = 0.0;                  // Initial account balance
+datetime g_lastStopLossTime = 0;               // Last stop loss time
+double g_maxDrawdownReached = 0.0;             // Maximum drawdown reached
+bool g_highLossTriggered = false;              // High loss flag
+int g_optimalZoneHandle = INVALID_HANDLE;
+int g_sniperEntryHandle = INVALID_HANDLE;
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    //--- Initialize symbol array
+    InitializeSymbols();
+    
+    //--- Validate inputs
+    if(!ValidateInputs())
+    {
+        Print("Fxdaddy EA: Input validation failed!");
+        return INIT_FAILED;
+    }
+    
+    //--- Initialize signal buffer
+    g_signalBuffer = InpSignalBuffer;
+
+    //--- Lock the EA to the chart timeframe where it's attached
+    g_chartTimeframe = Period();
+    Print("FXDADDY: Locked to chart timeframe (Period): ", g_chartTimeframe);
+    //--- Record startup time for startup delay guard
+    g_startTime = TimeLocal();
+    
+    //--- Initialize risk management variables
+    g_stopTrading = false;
+    g_consecutiveLosses = 0;
+    g_initialBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+    g_lastStopLossTime = 0;
+    g_maxDrawdownReached = 0.0;
+    g_highLossTriggered = false;
+    
+    //--- Print initialization message
+    Print("Fxdaddy EA initialized successfully!");
+    Print("Lot Size: ", InpLotSize);
+    Print("Max Trades: ", InpMaxTrades);
+    Print("Daily Loss Limit: $", InpDailyLossLimit);
+    Print("BTA Password: ", InpBTAPassword);
+    Print("Test Mode: ", InpTestMode ? "Enabled" : "Disabled");
+    Print("Trading Symbols: ", ArraySize(g_tradingSymbols));
+    Print("Advanced Risk Management: Enabled");
+    Print("Stop After Stop Loss: ", InpStopAfterStopLoss ? "Yes" : "No");
+    Print("Max Consecutive Losses: ", InpMaxConsecutiveLosses);
+    Print("Max Drawdown: ", InpMaxDrawdownPercent, "%");
+    
+    //--- Print selected indices
+    for(int i = 0; i < ArraySize(g_tradingSymbols); i++)
+    {
+        Print("Trading Index: ", g_tradingSymbols[i]);
+    }
+
+    //--- Optionally skip the previous closed bar at startup to avoid immediate trades
+    if(InpSkipFirstBar)
+    {
+        for(int j = 0; j < ArraySize(g_tradingSymbols); j++)
+        {
+            string sym = g_tradingSymbols[j];
+            datetime lastClosed = (datetime)iTime(sym, g_chartTimeframe, 1);
+            if(lastClosed > 0)
+            {
+                g_lastProcessedBarTime[j] = lastClosed;
+                Print("FXDADDY: Skipping previous closed bar for ", sym, " (time: ", TimeToString(lastClosed, TIME_DATE|TIME_MINUTES), ")");
+            }
+        }
+    }
+    
+    //--- Test BTA indicators (non-critical) - moved to OnTimer to avoid OnInit failures
+    // TestBTAIndicators(); // Moved to OnTimer for safety
+    
+    return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//| Test BTA indicators (non-critical) - Following MQL5 best practices |
+//+------------------------------------------------------------------+
+void TestBTAIndicators()
+{
+    Print("Testing BTA indicators using research-based solutions...");
+    
+    //--- Check if BTA indicators exist in the system
+    ValidateBTAIndicatorFiles();
+    
+    //--- Test BTA Optimal Trade Zone with BTA-specific parameters
+    TestBTAIndicator(InpBTAOptimalZone, "BTA Optimal Trade Zone");
+    
+    //--- Test BTA Sniper Entry with BTA-specific parameters
+    TestBTAIndicator(InpBTASniperEntry, "BTA Sniper Entry");
+}
+
+//+------------------------------------------------------------------+
+//| Validate BTA indicator files exist in the system                |
+//+------------------------------------------------------------------+
+void ValidateBTAIndicatorFiles()
+{
+    Print("Validating BTA indicator files...");
+    
+    //--- Check multiple possible locations for BTA indicators
+    string possiblePaths[] = {
+        "Indicators\\" + InpBTAOptimalZone + ".ex5",
+        "MQL5\\Indicators\\" + InpBTAOptimalZone + ".ex5",
+        InpBTAOptimalZone + ".ex5"
+    };
+    
+    bool optimalZoneFound = false;
+    for(int i = 0; i < ArraySize(possiblePaths); i++)
+    {
+        if(FileIsExist(possiblePaths[i]))
+        {
+            Print("✓ BTA Optimal Trade Zone found: ", possiblePaths[i]);
+            optimalZoneFound = true;
+            break;
+        }
+    }
+    
+    if(!optimalZoneFound)
+    {
+        Print("✗ BTA Optimal Trade Zone not found in any location");
+        Print("Please ensure the indicator is installed in your MT5 Indicators folder");
+        Print("Indicator name: ", InpBTAOptimalZone);
+    }
+    
+    //--- Check multiple possible locations for BTA Sniper Entry
+    string sniperPaths[] = {
+        "Indicators\\" + InpBTASniperEntry + ".ex5",
+        "MQL5\\Indicators\\" + InpBTASniperEntry + ".ex5",
+        InpBTASniperEntry + ".ex5"
+    };
+    
+    bool sniperEntryFound = false;
+    for(int i = 0; i < ArraySize(sniperPaths); i++)
+    {
+        if(FileIsExist(sniperPaths[i]))
+        {
+            Print("✓ BTA Sniper Entry found: ", sniperPaths[i]);
+            sniperEntryFound = true;
+            break;
+        }
+    }
+    
+    if(!sniperEntryFound)
+    {
+        Print("✗ BTA Sniper Entry not found in any location");
+        Print("Please ensure the indicator is installed in your MT5 Indicators folder");
+        Print("Indicator name: ", InpBTASniperEntry);
+    }
+    
+    //--- Print BTA license information
+    Print("BTA License Key: ", InpBTAPassword);
+    Print("BTA Text Size: ", InpBTATextSize);
+    Print("BTA Test Mode: ", InpTestMode ? "Enabled" : "Disabled");
+    
+    //--- Provide installation guidance
+    if(!optimalZoneFound || !sniperEntryFound)
+    {
+        Print("=== BTA INDICATOR INSTALLATION GUIDE ===");
+        Print("1. Copy BTA indicator files to your MT5 Indicators folder");
+        Print("2. Restart MetaTrader 5");
+        Print("3. The EA will automatically detect the indicators");
+        Print("4. If indicators are not found, Test Mode will be used");
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Test individual BTA indicator with comprehensive parameter testing |
+//+------------------------------------------------------------------+
+void TestBTAIndicator(string indicatorName, string displayName)
+{
+    int testHandle = INVALID_HANDLE;
+    
+    //--- BTA-specific testing based on research findings
+    Print("Testing ", displayName, " with BTA-specific parameter combinations...");
+    
+    // Method 1: BTA License Key as first parameter (most common)
+    testHandle = iCustom(Symbol(), g_chartTimeframe, indicatorName, InpBTAPassword);
+    if(testHandle != INVALID_HANDLE)
+    {
+        Print(displayName, " loaded successfully with BTA password only");
+        IndicatorRelease(testHandle);
+        return;
+    }
+    
+    // Method 2: Try with license key and text size
+    testHandle = iCustom(Symbol(), g_chartTimeframe, indicatorName, InpBTAPassword, InpBTATextSize);
+    if(testHandle != INVALID_HANDLE)
+    {
+        Print(displayName, " loaded successfully with BTA password and text size");
+        IndicatorRelease(testHandle);
+        return;
+    }
+    
+    // Method 3: Try with text size first, then password
+    testHandle = iCustom(Symbol(), g_chartTimeframe, indicatorName, InpBTATextSize, InpBTAPassword);
+    if(testHandle != INVALID_HANDLE)
+    {
+        Print(displayName, " loaded successfully with text size and BTA password");
+        IndicatorRelease(testHandle);
+        return;
+    }
+    
+    // Method 4: Try with NULL symbol and BTA password
+    testHandle = iCustom(NULL, g_chartTimeframe, indicatorName, InpBTAPassword);
+    if(testHandle != INVALID_HANDLE)
+    {
+        Print(displayName, " loaded successfully with NULL symbol and BTA password");
+        IndicatorRelease(testHandle);
+        return;
+    }
+    
+    // Method 5: Try without any parameters (fallback)
+    testHandle = iCustom(Symbol(), g_chartTimeframe, indicatorName);
+    if(testHandle != INVALID_HANDLE)
+    {
+        Print(displayName, " loaded successfully without parameters");
+        IndicatorRelease(testHandle);
+        return;
+    }
+    
+    // Method 6: Try with empty string password
+    testHandle = iCustom(Symbol(), g_chartTimeframe, indicatorName, "");
+    if(testHandle != INVALID_HANDLE)
+    {
+        Print(displayName, " loaded successfully with empty password");
+        IndicatorRelease(testHandle);
+        return;
+    }
+    
+    // Method 7: Try with 0,0 parameters
+    testHandle = iCustom(Symbol(), g_chartTimeframe, indicatorName, 0, 0);
+    if(testHandle != INVALID_HANDLE)
+    {
+        Print(displayName, " loaded successfully with (0,0) parameters");
+        IndicatorRelease(testHandle);
+        return;
+    }
+    
+    //--- All methods failed - BTA licensing issue
+    Print("Warning: ", displayName, " not available. Error: ", GetLastError());
+    Print("BTA Indicator Licensing Issue - Tried all parameter combinations:");
+    Print("- BTA password only");
+    Print("- BTA password + text size");
+    Print("- Text size + BTA password");
+    Print("- NULL symbol + BTA password");
+    Print("- No parameters");
+    Print("- Empty password");
+    Print("- (0,0) parameters");
+    Print("BTA License Key: ", InpBTAPassword);
+    
+    if(InpTestMode)
+    {
+        Print("Test Mode: Will use random signals for ", displayName);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    //--- Release indicator handles
+    if(g_optimalZoneHandle != INVALID_HANDLE)
+    {
+        IndicatorRelease(g_optimalZoneHandle);
+        g_optimalZoneHandle = INVALID_HANDLE;
+    }
+    
+    if(g_sniperEntryHandle != INVALID_HANDLE)
+    {
+        IndicatorRelease(g_sniperEntryHandle);
+        g_sniperEntryHandle = INVALID_HANDLE;
+    }
+    
+    Print("Fxdaddy EA deinitialized. Reason: ", reason);
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+    //--- Check if trading is allowed
+    if(!IsTradingAllowed())
+        return;
+    
+    //--- Monitor trade events for stop losses
+    MonitorTradeEvents();
+    
+    //--- Advanced Risk Management Checks
+    if(!CheckAdvancedRiskManagement())
+        return;
+    
+    //--- Check daily loss limit with enhanced validation
+    if(IsDailyLossLimitReached())
+    {
+        Print("DAILY LOSS LIMIT REACHED: $", DoubleToString(g_dailyProfit, 2), " (Limit: $", InpDailyLossLimit, ")");
+        Print("TRADING STOPPED: Daily loss limit exceeded. EA will stop trading until next day.");
+        g_stopTrading = true; // Stop all trading
+        return;
+    }
+    
+    //--- Check if we're close to daily limit (80% of limit)
+    CalculateDailyProfit();
+    if(g_dailyProfit <= -(InpDailyLossLimit * 0.8))
+    {
+        Print("⚠️ WARNING: Approaching daily loss limit: $", DoubleToString(g_dailyProfit, 2), " (80% of $", InpDailyLossLimit, ")");
+        return;
+    }
+    
+    //--- Reset daily loss limit for new day
+    ResetDailyLossLimitIfNewDay();
+    
+    //--- Check account balance and margin requirements
+    double accountBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+    double accountEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+    double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+    
+    if(accountBalance <= 0)
+    {
+        Print("Account balance is negative or zero: $", accountBalance, " - Trading stopped!");
+        return;
+    }
+    
+    if(accountEquity <= 0)
+    {
+        Print("Account equity is negative: $", accountEquity, " - Trading stopped!");
+        return;
+    }
+    
+    if(freeMargin <= 10.0) // Minimum $10 free margin required
+    {
+        Print("Insufficient free margin: $", freeMargin, " - Trading stopped!");
+        return;
+    }
+    
+    //--- Check maximum positions
+    if(GetCurrentPositions() >= InpMaxTrades)
+    {
+        return;
+    }
+    
+    //--- Process trailing stops
+    if(InpUseTrailingStop)
+        ProcessTrailingStops();
+    
+    //--- Check for new signals on all symbols
+    for(int i = 0; i < ArraySize(g_tradingSymbols); i++)
+    {
+        CheckBTASignals(g_tradingSymbols[i]);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Initialize trading symbols array                                 |
+//+------------------------------------------------------------------+
+void InitializeSymbols()
+{
+    ArrayResize(g_tradingSymbols, 0);
+    
+    //--- Volatility Indices
+    if(InpTradeVol10) AddSymbol("Volatility 10 Index");
+    if(InpTradeVol25) AddSymbol("Volatility 25 Index");
+    if(InpTradeVol50) AddSymbol("Volatility 50 Index");
+    if(InpTradeVol75) AddSymbol("Volatility 75 Index");
+    if(InpTradeVol100) AddSymbol("Volatility 100 Index");
+    
+    //--- Volatility 1s Indices
+    if(InpTradeVol10_1s) AddSymbol("Volatility 10 (1s) Index");
+    if(InpTradeVol25_1s) AddSymbol("Volatility 25 (1s) Index");
+    if(InpTradeVol50_1s) AddSymbol("Volatility 50 (1s) Index");
+    if(InpTradeVol75_1s) AddSymbol("Volatility 75 (1s) Index");
+    if(InpTradeVol100_1s) AddSymbol("Volatility 100 (1s) Index");
+    
+    //--- Crash & Boom Indices
+    if(InpTradeCrash500) AddSymbol("Crash 500 Index");
+    if(InpTradeCrash1000) AddSymbol("Crash 1000 Index");
+    if(InpTradeBoom500) AddSymbol("Boom 500 Index");
+    if(InpTradeBoom1000) AddSymbol("Boom 1000 Index");
+    if(InpTradeCrash300) AddSymbol("Crash 300 Index");
+    if(InpTradeCrash600) AddSymbol("Crash 600 Index");
+    if(InpTradeCrash900) AddSymbol("Crash 900 Index");
+    if(InpTradeBoom300) AddSymbol("Boom 300 Index");
+    if(InpTradeBoom600) AddSymbol("Boom 600 Index");
+    if(InpTradeBoom900) AddSymbol("Boom 900 Index");
+    
+    //--- Step Indices
+    if(InpTradeStep) AddSymbol("Step Index");
+    if(InpTradeRangeBreak100) AddSymbol("Range Break 100 Index");
+    if(InpTradeRangeBreak200) AddSymbol("Range Break 200 Index");
+}
+
+//+------------------------------------------------------------------+
+//| Add symbol to trading list                                       |
+//+------------------------------------------------------------------+
+void AddSymbol(string symbol)
+{
+    int size = ArraySize(g_tradingSymbols);
+    ArrayResize(g_tradingSymbols, size + 1);
+    g_tradingSymbols[size] = symbol;
+    // Initialize per-symbol state arrays consistently
+    ArrayResize(g_waitingForConfirmation, size + 1);
+    ArrayResize(g_waitingDirection, size + 1);
+    ArrayResize(g_lastProcessedBarTime, size + 1);
+    ArrayResize(g_seenInitialBar, size + 1);
+    g_waitingForConfirmation[size] = false;
+    g_waitingDirection[size] = 0;
+    g_lastProcessedBarTime[size] = 0;
+    g_seenInitialBar[size] = false;
+}
+
+//+------------------------------------------------------------------+
+//| Validate input parameters                                        |
+//+------------------------------------------------------------------+
+bool ValidateInputs()
+{
+    bool allValid = true;
+    
+    Print("🔍 COMPREHENSIVE INPUT VALIDATION STARTING...");
+    Print("================================================");
+    
+    //--- Validate lot size
+    if(InpLotSize <= 0)
+    {
+        Print("❌ ERROR: Lot size must be greater than 0 (Current: ", InpLotSize, ")");
+        allValid = false;
+    }
+    else if(InpLotSize > 10.0)
+    {
+        Print("⚠️ WARNING: Lot size is very high (", InpLotSize, "). Consider reducing for safety.");
+    }
+    else
+    {
+        Print("✅ Lot Size: ", InpLotSize, " - Valid");
+    }
+    
+    //--- Validate maximum trades
+    if(InpMaxTrades <= 0)
+    {
+        Print("❌ ERROR: Maximum trades must be greater than 0 (Current: ", InpMaxTrades, ")");
+        allValid = false;
+    }
+    else if(InpMaxTrades > 20)
+    {
+        Print("⚠️ WARNING: Maximum trades is very high (", InpMaxTrades, "). Consider reducing for risk management.");
+    }
+    else
+    {
+        Print("✅ Max Trades: ", InpMaxTrades, " - Valid");
+    }
+    
+    //--- Validate daily loss limit
+    if(InpDailyLossLimit <= 0)
+    {
+        Print("❌ ERROR: Daily loss limit must be greater than 0 (Current: $", InpDailyLossLimit, ")");
+        allValid = false;
+    }
+    else if(InpDailyLossLimit > 1000.0)
+    {
+        Print("⚠️ WARNING: Daily loss limit is very high ($", InpDailyLossLimit, "). Consider reducing for safety.");
+    }
+    else
+    {
+        Print("✅ Daily Loss Limit: $", InpDailyLossLimit, " - Valid");
+    }
+    
+    //--- Validate stop loss and take profit
+    if(InpStopLoss <= 0 || InpTakeProfit <= 0)
+    {
+        Print("❌ ERROR: Stop loss and take profit must be greater than 0 (SL: ", InpStopLoss, ", TP: ", InpTakeProfit, ")");
+        allValid = false;
+    }
+    else if(InpStopLoss >= InpTakeProfit)
+    {
+        Print("⚠️ WARNING: Stop loss (", InpStopLoss, ") should be smaller than take profit (", InpTakeProfit, ") for better risk/reward");
+    }
+    else
+    {
+        Print("✅ Stop Loss: ", InpStopLoss, " pips, Take Profit: ", InpTakeProfit, " pips - Valid");
+    }
+    
+    //--- Validate maximum loss per trade
+    if(InpMaxLossPerTrade <= 0)
+    {
+        Print("❌ ERROR: Maximum loss per trade must be greater than 0 (Current: $", InpMaxLossPerTrade, ")");
+        allValid = false;
+    }
+    else if(InpMaxLossPerTrade > InpDailyLossLimit)
+    {
+        Print("⚠️ WARNING: Max loss per trade ($", InpMaxLossPerTrade, ") is higher than daily limit ($", InpDailyLossLimit, ")");
+    }
+    else
+    {
+        Print("✅ Max Loss Per Trade: $", InpMaxLossPerTrade, " - Valid");
+    }
+    
+    //--- Validate trading symbols
+    if(ArraySize(g_tradingSymbols) == 0)
+    {
+        Print("❌ ERROR: No trading symbols selected");
+        allValid = false;
+    }
+    else
+    {
+        Print("✅ Trading Symbols: ", ArraySize(g_tradingSymbols), " selected - Valid");
+    }
+    
+    //--- Validate risk management parameters
+    if(InpMaxConsecutiveLosses <= 0)
+    {
+        Print("❌ ERROR: Max consecutive losses must be greater than 0 (Current: ", InpMaxConsecutiveLosses, ")");
+        allValid = false;
+    }
+    else
+    {
+        Print("✅ Max Consecutive Losses: ", InpMaxConsecutiveLosses, " - Valid");
+    }
+    
+    if(InpMaxDrawdownPercent <= 0 || InpMaxDrawdownPercent > 50.0)
+    {
+        Print("❌ ERROR: Max drawdown must be between 1% and 50% (Current: ", InpMaxDrawdownPercent, "%)");
+        allValid = false;
+    }
+    else
+    {
+        Print("✅ Max Drawdown: ", InpMaxDrawdownPercent, "% - Valid");
+    }
+    
+    if(InpCooldownMinutes < 0 || InpCooldownMinutes > 1440)
+    {
+        Print("❌ ERROR: Cooldown minutes must be between 0 and 1440 (Current: ", InpCooldownMinutes, ")");
+        allValid = false;
+    }
+    else
+    {
+        Print("✅ Cooldown Period: ", InpCooldownMinutes, " minutes - Valid");
+    }
+    
+    //--- Print validation summary
+    Print("================================================");
+    if(allValid)
+    {
+        Print("🎉 ALL INPUT PARAMETERS VALIDATED SUCCESSFULLY!");
+        Print("✅ EA is ready for trading with proper risk management.");
+    }
+    else
+    {
+        Print("❌ INPUT VALIDATION FAILED! Please fix the errors above.");
+        Print("⚠️ EA will not start until all parameters are valid.");
+    }
+    
+    return allValid;
+}
+
+//+------------------------------------------------------------------+
+//| Check if trading is allowed                                     |
+//+------------------------------------------------------------------+
+bool IsTradingAllowed()
+{
+    //--- Check if market is open
+    if(!IsMarketOpen())
+        return false;
+    
+    //--- Check trading time
+    if(!IsWithinTradingHours())
+        return false;
+    
+    //--- Check if it's Friday and Friday trading is disabled
+    MqlDateTime timeStruct;
+    TimeToStruct(TimeLocal(), timeStruct);
+    if(!InpTradeOnFriday && timeStruct.day_of_week == 5)
+        return false;
+    
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Check if market is open                                         |
+//+------------------------------------------------------------------+
+bool IsMarketOpen()
+{
+    //--- Synthetic indices trade 24/7, including weekends
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Check if current time is within trading hours                   |
+//+------------------------------------------------------------------+
+bool IsWithinTradingHours()
+{
+    datetime currentTime = TimeLocal();
+    MqlDateTime timeStruct;
+    TimeToStruct(currentTime, timeStruct);
+    
+    //--- Check if weekend trading is allowed
+    if(!InpTradeOnWeekend && (timeStruct.day_of_week == 0 || timeStruct.day_of_week == 6))
+        return false;
+    
+    //--- Check if Friday trading is allowed
+    if(!InpTradeOnFriday && timeStruct.day_of_week == 5)
+        return false;
+    
+    //--- Parse start and end times
+    string startTimeStr = InpStartTime;
+    string endTimeStr = InpEndTime;
+    
+    int startHour = (int)StringToInteger(StringSubstr(startTimeStr, 0, 2));
+    int startMinute = (int)StringToInteger(StringSubstr(startTimeStr, 3, 2));
+    int endHour = (int)StringToInteger(StringSubstr(endTimeStr, 0, 2));
+    int endMinute = (int)StringToInteger(StringSubstr(endTimeStr, 3, 2));
+    
+    int currentHour = timeStruct.hour;
+    int currentMinute = timeStruct.min;
+    
+    //--- Convert to minutes for comparison
+    int currentMinutes = currentHour * 60 + currentMinute;
+    int startMinutes = startHour * 60 + startMinute;
+    int endMinutes = endHour * 60 + endMinute;
+    
+    return (currentMinutes >= startMinutes && currentMinutes <= endMinutes);
+}
+
+//+------------------------------------------------------------------+
+//| Check if daily loss limit is reached                            |
+//+------------------------------------------------------------------+
+bool IsDailyLossLimitReached()
+{
+    //--- Reset daily profit if new day
+    MqlDateTime currentTime, lastTime;
+    TimeToStruct(TimeLocal(), currentTime);
+    TimeToStruct(g_lastTradeDate, lastTime);
+    if(currentTime.day != lastTime.day || currentTime.mon != lastTime.mon || currentTime.year != lastTime.year)
+    {
+        g_dailyProfit = 0.0;
+        g_lastTradeDate = TimeLocal();
+    }
+    
+    //--- Calculate current daily profit
+    CalculateDailyProfit();
+    
+    return (g_dailyProfit <= -InpDailyLossLimit);
+}
+
+//+------------------------------------------------------------------+
+//| Reset daily loss limit for new day                               |
+//+------------------------------------------------------------------+
+void ResetDailyLossLimitIfNewDay()
+{
+    MqlDateTime currentTime, lastTime;
+    TimeToStruct(TimeLocal(), currentTime);
+    TimeToStruct(g_lastTradeDate, lastTime);
+    
+    //--- Check if it's a new day
+    if(currentTime.day != lastTime.day || currentTime.mon != lastTime.mon || currentTime.year != lastTime.year)
+    {
+        //--- Reset daily profit and trading flags
+        g_dailyProfit = 0.0;
+        g_lastTradeDate = TimeLocal();
+        g_stopTrading = false; // Reset trading stop flag
+        g_consecutiveLosses = 0; // Reset consecutive losses
+        g_highLossTriggered = false; // Reset high loss flag
+        
+        Print("🔄 NEW DAY DETECTED: Daily loss limit reset. Trading resumed.");
+        Print("📊 Daily P&L: $", DoubleToString(g_dailyProfit, 2), " | Consecutive Losses: ", g_consecutiveLosses);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Calculate daily profit/loss                                      |
+//+------------------------------------------------------------------+
+void CalculateDailyProfit()
+{
+    g_dailyProfit = 0.0;
+    
+    //--- Get all positions opened today
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if(PositionGetTicket(i) > 0)
+        {
+            if(PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+            {
+                MqlDateTime posTime, currentTime;
+                TimeToStruct(PositionGetInteger(POSITION_TIME), posTime);
+                TimeToStruct(TimeLocal(), currentTime);
+                if(posTime.day == currentTime.day && posTime.mon == currentTime.mon && posTime.year == currentTime.year)
+                {
+                    g_dailyProfit += PositionGetDouble(POSITION_PROFIT);
+                }
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Get current number of positions                                 |
+//+------------------------------------------------------------------+
+int GetCurrentPositions()
+{
+    int count = 0;
+    
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if(PositionGetTicket(i) > 0)
+        {
+            if(PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+                count++;
+        }
+    }
+    
+    return count;
+}
+
+//+------------------------------------------------------------------+
+//| Check BTA signals for a symbol                                   |
+//+------------------------------------------------------------------+
+void CheckBTASignals(string symbol)
+{
+    //--- Check if we already have a position on this symbol
+    if(HasPositionOnSymbol(symbol))
+        return;
+    
+    //--- Get symbol index
+    int sIndex = GetSymbolIndex(symbol);
+    if(sIndex < 0)
+    {
+        Print("CheckBTASignals: Symbol not found in list: ", symbol);
+        return;
+    }
+
+    //--- Ensure we process only once per closed bar (use previous bar time on locked timeframe)
+    datetime prevBarTime = (datetime)iTime(symbol, g_chartTimeframe, 1);
+    if(prevBarTime <= 0)
+    {
+        // Could not get bar time, skip
+        return;
+    }
+    if(g_lastProcessedBarTime[sIndex] == prevBarTime)
+    {
+        // already processed this closed bar
+        return;
+    }
+
+    // If we have no recorded last processed time for this symbol (init couldn't read history),
+    // record this first observed closed bar and skip processing once to avoid immediate trades.
+    if(g_lastProcessedBarTime[sIndex] == 0 && !g_seenInitialBar[sIndex])
+    {
+        g_lastProcessedBarTime[sIndex] = prevBarTime;
+        g_seenInitialBar[sIndex] = true;
+        Print("FXDADDY: Initial bar skip for ", symbol, " (time: ", TimeToString(prevBarTime, TIME_DATE|TIME_MINUTES), ") - will process next closed bar");
+        return;
+    }
+    // mark processed at end of function
+
+    //--- Get BTA indicator values
+    double optimalZoneSignal = GetBTAOptimalZoneSignal(symbol);
+    double sniperEntrySignal = GetBTASniperEntrySignal(symbol);
+
+    Print("BTA Signals for ", symbol, ": Optimal Zone: ", optimalZoneSignal, ", Sniper Entry: ", sniperEntrySignal);
+
+    //--- Check if both indicators are in the same zone (both active and same direction)
+    bool optimalZoneActive = (optimalZoneSignal != 0.0 && optimalZoneSignal != EMPTY_VALUE);
+    bool sniperEntryActive = (sniperEntrySignal != 0.0 && sniperEntrySignal != EMPTY_VALUE);
+
+    //--- Determine signal direction and strength for each indicator
+    bool optimalZoneBuy = (optimalZoneSignal > 0);
+    bool optimalZoneSell = (optimalZoneSignal < 0);
+    bool sniperEntryBuy = (sniperEntrySignal > 0);
+    bool sniperEntrySell = (sniperEntrySignal < 0);
+
+    //--- Calculate signal strength (for logging and analysis)
+    double optimalZoneStrength = MathAbs(optimalZoneSignal);
+    double sniperEntryStrength = MathAbs(sniperEntrySignal);
+
+    //--- BTA INDICATOR INTEGRATION LOGIC (Correct Understanding)
+    //--- Optimal Zone: Identifies support/resistance zones (constant levels)
+    //--- Sniper Entry: Provides precise entry signals within those zones
+
+    //--- Check if we're in an optimal zone (support/resistance area)
+    bool inOptimalZone = (optimalZoneActive && (optimalZoneStrength > 0));
+
+    //--- Determine zone direction: positive -> Blue (Buy), negative -> Yellow (Sell)
+    int zoneDirection = 0; // 1=buy, -1=sell, 0=neutral
+    if(optimalZoneActive)
+        zoneDirection = (optimalZoneSignal > 0) ? 1 : -1;
+
+    bool zoneReallyActive = optimalZoneActive && (optimalZoneSignal != 0.0);
+    Print(StringFormat("Zone Analysis for %s: Active: %s, Direction: %d (1=buy, -1=sell), Strength: %.2f", symbol, zoneReallyActive ? "Yes" : "No", zoneDirection, optimalZoneStrength));
+
+    //--- Check for sniper entry signals (relaxed for higher win rate)
+    bool sniperBuySignal = (sniperEntryActive && sniperEntryBuy && sniperEntryStrength >= 0); // Changed >0 to >=0
+    bool sniperSellSignal = (sniperEntryActive && sniperEntrySell && sniperEntryStrength >= 0); // Changed >0 to >=0
+
+    Print(StringFormat("Sniper Signals for %s: Buy: %s, Sell: %s, Strength: %.2f", symbol, sniperBuySignal ? "Yes" : "No", sniperSellSignal ? "Yes" : "No", sniperEntryStrength));
+
+    //--- Determine whether sniper signal is likely inside the zone (heuristic)
+    bool sniperInsideZone = false;
+    if(optimalZoneActive && ((sniperBuySignal && zoneDirection == 1) || (sniperSellSignal && zoneDirection == -1)))
+        sniperInsideZone = true;
+
+    Print("Trade Conditions for ", symbol, ": Sniper Inside Zone: ", sniperInsideZone, ", Zone Match: ", (optimalZoneActive ? ((sniperBuySignal && zoneDirection == 1) || (sniperSellSignal && zoneDirection == -1)) : "N/A"));
+
+    //--- Relaxed confirmation logic: Allow sniper signals inside zones for higher win rate
+    // Prioritize sniper signals over strict zone confirmation
+
+    //--- Before taking any trade, enforce startup delay and require valid indicator data
+    if(TimeLocal() - g_startTime < (InpStartupDelayMinutes * 60))
+    {
+        Print("FXDADDY: Startup delay active (", InpStartupDelayMinutes, " minutes). Skipping trading for ", symbol);
+        // mark processed closed bar time for this symbol to avoid re-evaluating immediately
+        g_lastProcessedBarTime[sIndex] = prevBarTime;
+        return;
+    }
+
+    if(sniperEntryActive && (sniperBuySignal || sniperSellSignal)) // Removed !sniperInsideZone to allow inside zone trades
+    {
+        // Allow trades with relaxed conditions for higher win rate
+        if(optimalZoneActive)
+        {
+            if((sniperBuySignal && zoneDirection == 1) || (sniperSellSignal && zoneDirection == -1))
+            {
+                // Require both indicators to be valid (non-zero) before trading
+                if(optimalZoneSignal == 0.0 || sniperEntrySignal == 0.0)
+                {
+                    Print("FXDADDY: Indicator missing for ", symbol, " - skipping trade (Zone: ", optimalZoneSignal, ", Sniper: ", sniperEntrySignal, ")");
+                }
+                else
+                {
+                    if(sniperBuySignal)
+                    {
+                        Print("RELAXED BUY: ", symbol, " - Sniper: ", sniperEntrySignal, " Zone: ", optimalZoneSignal, " Inside Zone: ", sniperInsideZone, " PrevBar: ", TimeToString(prevBarTime, TIME_DATE|TIME_MINUTES));
+                        ExecuteBuyTrade(symbol);
+                    }
+                    else
+                    {
+                        Print("RELAXED SELL: ", symbol, " - Sniper: ", sniperEntrySignal, " Zone: ", optimalZoneSignal, " Inside Zone: ", sniperInsideZone, " PrevBar: ", TimeToString(prevBarTime, TIME_DATE|TIME_MINUTES));
+                        ExecuteSellTrade(symbol);
+                    }
+                }
+            }
+            else
+            {
+                Print("Zone/signal mismatch: ", symbol, " - Zone: ", optimalZoneSignal, " Sniper: ", sniperEntrySignal);
+            }
+        }
+        else
+        {
+            // no zone - allow sniper-only trade
+            if(sniperBuySignal)
+            {
+                Print("SNIPER-ONLY BUY (no zone): ", symbol, " - Sniper: ", sniperEntrySignal, " Inside Zone: ", sniperInsideZone);
+                ExecuteBuyTrade(symbol);
+            }
+            else if(sniperSellSignal)
+            {
+                Print("SNIPER-ONLY SELL (no zone): ", symbol, " - Sniper: ", sniperEntrySignal, " Inside Zone: ", sniperInsideZone);
+                ExecuteSellTrade(symbol);
+            }
+        }
+
+        // Clear any previous waiting state
+        g_waitingForConfirmation[sIndex] = false;
+        g_waitingDirection[sIndex] = 0;
+    }
+    else
+    {
+        // No immediate sniper action; no waiting-state logic in strict mode.
+
+        // If sniper was inside zone, ignore it. If sniper outside but misaligned with zone, log misalignment.
+
+        //--- Log misalignment or single active indicator similar to prior behavior
+    if(optimalZoneActive || sniperEntryActive)
+        {
+            static datetime lastZoneLog = 0;
+            if(TimeLocal() - lastZoneLog > 60) // Log max once per minute
+            {
+                string zoneStatus = "";
+                if(optimalZoneActive && sniperEntryActive)
+                {
+                    if(optimalZoneBuy && sniperEntrySell) zoneStatus = "Optimal Zone BUY, Sniper Entry SELL";
+                    else if(optimalZoneSell && sniperEntryBuy) zoneStatus = "Optimal Zone SELL, Sniper Entry BUY";
+                    else zoneStatus = "Both active but different zones";
+                }
+                else if(optimalZoneActive) zoneStatus = "Only Optimal Zone active: " + (optimalZoneBuy ? "BUY" : "SELL");
+                else if(sniperEntryActive) 
+                {
+                    if(sniperEntryStrength >= 85.0)
+                        zoneStatus = "Only Sniper Entry active: " + (sniperEntryBuy ? "BUY" : "SELL") + " (85%+ Confidence - Ready to Trade)";
+                    else
+                        zoneStatus = "Only Sniper Entry active: " + (sniperEntryBuy ? "BUY" : "SELL") + " (Strength: " + DoubleToString(sniperEntryStrength, 1) + "% - Below 85% Threshold)";
+                }
+                Print("BTA Zone Misalignment for ", symbol, " - ", zoneStatus, " (Optimal Zone: ", optimalZoneSignal, " Sniper Entry: ", sniperEntrySignal, ")");
+                lastZoneLog = TimeLocal();
+            }
+        }
+    }
+
+    // mark processed closed bar time for this symbol
+    g_lastProcessedBarTime[sIndex] = prevBarTime;
+}
+
+//+------------------------------------------------------------------+
+//| Advanced Risk Management Check                                   |
+//+------------------------------------------------------------------+
+bool CheckAdvancedRiskManagement()
+{
+    //--- Check if trading is globally stopped
+    if(g_stopTrading)
+    {
+        static datetime lastRiskLog = 0;
+        if(TimeLocal() - lastRiskLog > 300) // Log every 5 minutes
+        {
+            Print("Trading stopped due to risk management. Consecutive losses: ", g_consecutiveLosses, " Max drawdown: ", g_maxDrawdownReached, "%");
+            lastRiskLog = TimeLocal();
+        }
+        return false;
+    }
+    
+    //--- Check consecutive losses
+    if(g_consecutiveLosses >= InpMaxConsecutiveLosses)
+    {
+        g_stopTrading = true;
+        Print("TRADING STOPPED: Maximum consecutive losses reached (", g_consecutiveLosses, "/", InpMaxConsecutiveLosses, ")");
+        return false;
+    }
+    
+    //--- Check maximum drawdown
+    double currentBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+    double currentDrawdown = ((g_initialBalance - currentBalance) / g_initialBalance) * 100.0;
+    
+    if(currentDrawdown > g_maxDrawdownReached)
+    {
+        g_maxDrawdownReached = currentDrawdown;
+    }
+    
+    if(currentDrawdown >= InpMaxDrawdownPercent)
+    {
+        g_stopTrading = true;
+        Print("TRADING STOPPED: Maximum drawdown reached (", DoubleToString(currentDrawdown, 2), "%/", InpMaxDrawdownPercent, "%)");
+        return false;
+    }
+    
+    //--- Check high loss threshold
+    if(InpStopAfterHighLoss && g_dailyProfit <= -InpHighLossThreshold)
+    {
+        if(!g_highLossTriggered)
+        {
+            g_highLossTriggered = true;
+            g_stopTrading = true;
+            Print("TRADING STOPPED: High loss threshold reached ($", DoubleToString(-g_dailyProfit, 2), "/$", InpHighLossThreshold, ")");
+        }
+        return false;
+    }
+    
+    //--- Check cooldown period after stop loss
+    if(InpStopAfterStopLoss && g_lastStopLossTime > 0)
+    {
+        datetime cooldownEnd = g_lastStopLossTime + (InpCooldownMinutes * 60);
+        if(TimeLocal() < cooldownEnd)
+        {
+            static datetime lastCooldownLog = 0;
+            if(TimeLocal() - lastCooldownLog > 60) // Log every minute during cooldown
+            {
+                int remainingMinutes = (int)((cooldownEnd - TimeLocal()) / 60);
+                Print("Trading in cooldown period. Remaining: ", remainingMinutes, " minutes");
+                lastCooldownLog = TimeLocal();
+            }
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Monitor trades for stop loss events                              |
+//+------------------------------------------------------------------+
+void MonitorTradeEvents()
+{
+    //--- Check for closed positions
+    for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = HistoryDealGetTicket(i);
+        if(ticket > 0)
+        {
+            if(HistoryDealGetInteger(ticket, DEAL_MAGIC) == InpMagicNumber)
+            {
+                //--- Check if this is a recent close (within last few seconds)
+                datetime dealTime = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
+                if(TimeLocal() - dealTime < 5) // Within last 5 seconds
+                {
+                    double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+                    ENUM_DEAL_REASON reason = (ENUM_DEAL_REASON)HistoryDealGetInteger(ticket, DEAL_REASON);
+                    
+                    //--- Check if it's a stop loss
+                    if(reason == DEAL_REASON_SL)
+                    {
+                        g_lastStopLossTime = TimeLocal();
+                        g_consecutiveLosses++;
+                        
+                        Print("STOP LOSS DETECTED: Ticket ", ticket, " Profit: $", DoubleToString(profit, 2), " Consecutive losses: ", g_consecutiveLosses);
+                        
+                        if(InpStopAfterStopLoss)
+                        {
+                            g_stopTrading = true;
+                            Print("TRADING STOPPED: Stop loss hit. Cooldown period: ", InpCooldownMinutes, " minutes");
+                        }
+                    }
+                    else if(profit > 0)
+                    {
+                        //--- Reset consecutive losses on profitable trade
+                        g_consecutiveLosses = 0;
+                        Print("Profitable trade: Ticket ", ticket, " Profit: $", DoubleToString(profit, 2), " Consecutive losses reset to 0");
+                    }
+                }
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Get lot size based on symbol                                     |
+//+------------------------------------------------------------------+
+double GetLotSize(string symbol)
+{
+    //--- Symbol-specific lot sizes based on backtesting logs
+    if(StringFind(symbol, "Volatility 10") >= 0) return 0.5;
+    if(StringFind(symbol, "Volatility 25") >= 0) return 0.5;
+    if(StringFind(symbol, "Volatility 50") >= 0) return 4.0;
+    if(StringFind(symbol, "Volatility 75") >= 0) return InpLotSize;
+    if(StringFind(symbol, "Volatility 100") >= 0) return InpLotSize;
+    if(StringFind(symbol, "Volatility 10 (1s)") >= 0) return InpLotSize;
+    if(StringFind(symbol, "Volatility 25 (1s)") >= 0) return InpLotSize;
+    if(StringFind(symbol, "Volatility 50 (1s)") >= 0) return InpLotSize;
+    if(StringFind(symbol, "Volatility 75 (1s)") >= 0) return InpLotSize;
+    if(StringFind(symbol, "Volatility 100 (1s)") >= 0) return InpLotSize;
+
+    //--- Default to input lot size for other symbols
+    return InpLotSize;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate optimal position size based on risk management         |
+//+------------------------------------------------------------------+
+double CalculateOptimalPositionSize(string symbol, double signalStrength)
+{
+    //--- Base lot size
+    double baseLotSize = GetLotSize(symbol); // Use symbol-specific lot size
+
+    //--- Calculate risk per trade based on account balance
+    double accountBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+    double riskPercent = 0.02; // 2% risk per trade
+    double maxRiskAmount = accountBalance * riskPercent;
+
+    //--- Calculate position size based on stop loss
+    double stopLossPoints = InpStopLoss * 10.0; // Convert pips to points
+    double pointValue = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
+    double optimalLotSize = maxRiskAmount / (stopLossPoints * pointValue);
+
+    //--- Apply signal strength multiplier (stronger signals = larger positions)
+    double strengthMultiplier = 1.0;
+    if(signalStrength >= 1500.0) strengthMultiplier = 1.2; // 20% larger for strong signals
+    else if(signalStrength >= 1000.0) strengthMultiplier = 1.0; // Normal size for moderate signals
+    else strengthMultiplier = 0.8; // 20% smaller for weak signals
+
+    optimalLotSize *= strengthMultiplier;
+
+    //--- Use the smaller of base lot size or calculated optimal size
+    double finalLotSize = MathMin(baseLotSize, optimalLotSize);
+
+    //--- Apply maximum loss per trade limit
+    double maxVolumeForLoss = InpMaxLossPerTrade / (stopLossPoints * pointValue);
+    finalLotSize = MathMin(finalLotSize, maxVolumeForLoss);
+
+    //--- Ensure minimum lot size
+    double minVolume = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+    finalLotSize = MathMax(finalLotSize, minVolume);
+
+    return finalLotSize;
+}
+
+//+------------------------------------------------------------------+
+//| Normalize BTA signal to 0-1 range for percentage calculation     |
+//+------------------------------------------------------------------+
+double NormalizeBTASignal(double rawSignal)
+{
+    //--- Handle zero or invalid signals
+    if(rawSignal == 0.0 || rawSignal == EMPTY_VALUE)
+        return 0.0;
+    
+    //--- For large values (like 1361.65), normalize to 0-1 range
+    if(MathAbs(rawSignal) > 100.0)
+    {
+        //--- Use sigmoid function to normalize large values to 0-1 range
+        double normalized = 2.0 / (1.0 + MathExp(-rawSignal / 1000.0)) - 1.0;
+        return normalized;
+    }
+    
+    //--- For values in reasonable range, use direct normalization
+    if(MathAbs(rawSignal) > 1.0)
+    {
+        //--- Normalize to -1 to 1 range
+        return MathMax(-1.0, MathMin(1.0, rawSignal / 10.0));
+    }
+    
+    //--- Return as-is if already in -1 to 1 range
+    return rawSignal;
+}
+
+//+------------------------------------------------------------------+
+//| Check if we have a position on the symbol                        |
+//+------------------------------------------------------------------+
+bool HasPositionOnSymbol(string symbol)
+{
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if(PositionGetTicket(i) > 0)
+        {
+            if(PositionGetInteger(POSITION_MAGIC) == InpMagicNumber &&
+               PositionGetString(POSITION_SYMBOL) == symbol)
+                return true;
+        }
+    }
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Get BTA Optimal Trade Zone signal                               |
+//+------------------------------------------------------------------+
+double GetBTAOptimalZoneSignal(string symbol)
+{
+    //--- Get BTA signal following MQL5 best practices
+    return GetBTASignal(symbol, InpBTAOptimalZone, "BTA Optimal Trade Zone");
+}
+
+//+------------------------------------------------------------------+
+//| Get BTA signal with comprehensive parameter testing              |
+//+------------------------------------------------------------------+
+double GetBTASignal(string symbol, string indicatorName, string displayName)
+{
+    int handle = INVALID_HANDLE;
+    
+    //--- BTA-specific signal retrieval based on research
+    // Method 1: BTA License Key as first parameter (most common for BTA)
+    handle = iCustom(symbol, g_chartTimeframe, indicatorName, InpBTAPassword);
+    if(handle != INVALID_HANDLE)
+    {
+        return NormalizeBTASignal(ProcessBTASignal(handle, symbol, displayName));
+    }
+    
+    // Method 2: Try with license key and text size
+    handle = iCustom(symbol, g_chartTimeframe, indicatorName, InpBTAPassword, InpBTATextSize);
+    if(handle != INVALID_HANDLE)
+    {
+        return NormalizeBTASignal(ProcessBTASignal(handle, symbol, displayName));
+    }
+    
+    // Method 3: Try with text size first, then password
+    handle = iCustom(symbol, g_chartTimeframe, indicatorName, InpBTATextSize, InpBTAPassword);
+    if(handle != INVALID_HANDLE)
+    {
+        return NormalizeBTASignal(ProcessBTASignal(handle, symbol, displayName));
+    }
+    
+    // Method 4: Try with NULL symbol and BTA password
+    handle = iCustom(symbol, g_chartTimeframe, indicatorName, InpBTAPassword);
+    if(handle != INVALID_HANDLE)
+    {
+        return NormalizeBTASignal(ProcessBTASignal(handle, symbol, displayName));
+    }
+    
+    // Method 5: Try without any parameters (fallback)
+    handle = iCustom(symbol, g_chartTimeframe, indicatorName);
+    if(handle != INVALID_HANDLE)
+    {
+        return NormalizeBTASignal(ProcessBTASignal(handle, symbol, displayName));
+    }
+    
+    // Method 6: Try with empty string password
+    handle = iCustom(symbol, g_chartTimeframe, indicatorName, "");
+    if(handle != INVALID_HANDLE)
+    {
+        return NormalizeBTASignal(ProcessBTASignal(handle, symbol, displayName));
+    }
+    
+    // Method 7: Try with 0,0 parameters
+    handle = iCustom(symbol, g_chartTimeframe, indicatorName, 0, 0);
+    if(handle != INVALID_HANDLE)
+    {
+        return NormalizeBTASignal(ProcessBTASignal(handle, symbol, displayName));
+    }
+    
+    //--- All methods failed - handle error gracefully
+    static datetime lastErrorTime = 0;
+    if(TimeLocal() - lastErrorTime > 60) // Print error max once per minute
+    {
+        Print("Warning: ", displayName, " not available for ", symbol, " Error: ", GetLastError());
+        Print("BTA Licensing Issue - Tried: password only, password+textsize, textsize+password, NULL+password, no params, empty password, (0,0)");
+        lastErrorTime = TimeLocal();
+    }
+    
+    //--- If TestMode is enabled, we log that a fallback would have been used but we DO NOT return a random signal
+    //--- to avoid accidental live trades. Returning 0.0 ensures no trade is taken when indicator unavailable.
+    if(InpTestMode)
+    {
+        Print("TestMode active: indicator ", displayName, " unavailable for ", symbol, " - skipping trades (no random fallback)");
+    }
+    return 0.0;
+}
+
+//+------------------------------------------------------------------+
+//| Process BTA signal from indicator handle                         |
+//+------------------------------------------------------------------+
+double ProcessBTASignal(int handle, string symbol, string displayName)
+{
+    //--- Get indicator values following MQL5 best practices
+    double buffer[];
+    ArraySetAsSeries(buffer, true);
+    
+    //--- Ensure at least 1
+    int bufferCount = MathMax(1, g_signalBuffer);
+    bool bufferFound = false;
+    double signalValue = 0.0;
+
+    //--- Try multiple buffer indices (0 to 4) to find the signal buffer
+    for(int bufIndex = 0; bufIndex <= 4; bufIndex++)
+    {
+        int copied = CopyBuffer(handle, bufIndex, 0, bufferCount, buffer);
+        if(copied > 0)
+        {
+            signalValue = buffer[0];
+            Print(displayName, " found signal in buffer ", bufIndex, " for ", symbol, ": ", signalValue);
+            bufferFound = true;
+            break;
+        }
+    }
+
+    if(!bufferFound)
+    {
+        Print("Error: Cannot copy ", displayName, " buffer for ", symbol, " (tried buffers 0-4)");
+        return 0.0;
+    }
+    
+    //--- Log the raw signal value for debugging
+    Print(displayName, " raw signal for ", symbol, ": ", signalValue);
+
+    //--- Return the signal value
+    return signalValue;
+}
+
+//+------------------------------------------------------------------+
+//| Helper: get index of symbol in g_tradingSymbols                  |
+//+------------------------------------------------------------------+
+int GetSymbolIndex(string symbol)
+{
+    for(int i = 0; i < ArraySize(g_tradingSymbols); i++)
+    {
+        if(g_tradingSymbols[i] == symbol)
+            return i;
+    }
+    return -1;
+}
+
+//+------------------------------------------------------------------+
+//| Get BTA Sniper Entry signal                                      |
+//+------------------------------------------------------------------+
+double GetBTASniperEntrySignal(string symbol)
+{
+    //--- Get BTA signal following MQL5 best practices
+    return GetBTASignal(symbol, InpBTASniperEntry, "BTA Sniper Entry");
+}
+
+//+------------------------------------------------------------------+
+//| Execute BUY trade                                                |
+//+------------------------------------------------------------------+
+void ExecuteBuyTrade(string symbol)
+{
+    //--- Get current price
+    double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
+    double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+
+    if(ask <= 0 || bid <= 0)
+    {
+        Print("Error: Invalid price for ", symbol);
+        return;
+    }
+
+    //--- Enhanced volume validation for volatility indices
+    double minVolume = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+    double maxVolume = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+    double volumeStep = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+
+    //--- Calculate stop loss distance for dynamic sizing
+    double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+    long stopLevel = SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL);
+    double minStopDistance = (double)stopLevel * point;
+
+    //--- For volatility indices, use much larger stop distances
+    double volatilityMultiplier = 3.0; // Moderate multiplier for volatility indices
+    if(StringFind(symbol, "Volatility") >= 0 || StringFind(symbol, "Crash") >= 0 || StringFind(symbol, "Boom") >= 0)
+    {
+        volatilityMultiplier = 5.0; // Moderate distance for synthetic indices
+    }
+
+    //--- Calculate minimum required distances with aggressive multipliers
+    double requiredStopDistance = MathMax(minStopDistance * 3.0, InpStopLoss * point * volatilityMultiplier);
+
+    //--- Use symbol-specific lot size
+    double volume = GetLotSize(symbol);
+    Print("Lot size for ", symbol, ": ", volume);
+
+    //--- Basic volume validation
+    //--- Round to volume step
+    volume = MathRound(volume / volumeStep) * volumeStep;
+
+    //--- Ensure within min/max bounds
+    if(volume < minVolume)
+    {
+        volume = minVolume;
+        Print("Volume adjusted to minimum: ", volume, " for ", symbol);
+    }
+    if(volume > maxVolume)
+    {
+        volume = maxVolume;
+        Print("Volume adjusted to maximum: ", volume, " for ", symbol);
+    }
+
+    //--- Calculate stop loss and take profit with enhanced validation
+    //--- Use the already calculated requiredStopDistance from volume section
+    double requiredTakeProfitDistance = MathMax(minStopDistance * 3.0, InpTakeProfit * point * volatilityMultiplier);
+
+    //--- Calculate stop loss and take profit with enhanced distances
+    double stopLoss = ask - requiredStopDistance;
+    double takeProfit = ask + requiredTakeProfitDistance;
+
+    //--- Apply fixed Risk:Reward (e.g., 1:2) if enabled
+    if(InpUseFixedRiskReward)
+    {
+        double riskDistance = ask - stopLoss;
+        double rewardDistance = riskDistance * InpRiskRewardReward;
+        takeProfit = ask + rewardDistance;
+    }
+    
+    //--- Additional validation for volatility indices
+    if(StringFind(symbol, "Volatility") >= 0)
+    {
+        // Ensure minimum 50 point distance for volatility indices
+        double minVolatilityDistance = 50.0 * point;
+        if(ask - stopLoss < minVolatilityDistance)
+        {
+            stopLoss = ask - minVolatilityDistance;
+            Print("Stop Loss enhanced for volatility index: ", stopLoss, " for ", symbol);
+        }
+        if(takeProfit - ask < minVolatilityDistance)
+        {
+            takeProfit = ask + minVolatilityDistance;
+            Print("Take Profit enhanced for volatility index: ", takeProfit, " for ", symbol);
+        }
+    }
+    
+    //--- Final validation - ensure stops are far enough
+    double finalMinDistance = MathMax(minStopDistance * 5.0, 100.0 * point);
+    if(ask - stopLoss < finalMinDistance)
+    {
+        stopLoss = ask - finalMinDistance;
+        Print("Stop Loss final validation: ", stopLoss, " for ", symbol);
+    }
+    if(takeProfit - ask < finalMinDistance)
+    {
+        takeProfit = ask + finalMinDistance;
+        Print("Take Profit final validation: ", takeProfit, " for ", symbol);
+    }
+    
+    //--- Prepare trade request
+    MqlTradeRequest request = {};
+    MqlTradeResult result = {};
+    
+    request.action = TRADE_ACTION_DEAL;
+    request.symbol = symbol;
+    request.volume = volume;
+    request.type = ORDER_TYPE_BUY;
+    request.price = ask;
+    request.sl = stopLoss;
+    request.tp = takeProfit;
+    request.deviation = 10;
+    request.magic = InpMagicNumber;
+    request.comment = "Fxdaddy BUY";
+    request.type_time = ORDER_TIME_GTC;
+    request.type_filling = ORDER_FILLING_FOK;
+
+    //--- Execute trade
+    if(OrderSend(request, result))
+    {
+        if(result.retcode == TRADE_RETCODE_DONE)
+        {
+            Print("BUY trade executed: ", symbol, " Lot: ", volume, " Price: ", ask);
+        }
+        else
+        {
+            Print("BUY trade failed: ", symbol, " Error: ", result.retcode, " Comment: ", result.comment);
+        }
+    }
+    else
+    {
+        Print("BUY trade error: ", symbol, " Error: ", GetLastError());
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Execute SELL trade                                               |
+//+------------------------------------------------------------------+
+void ExecuteSellTrade(string symbol)
+{
+    //--- Get current price
+    double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
+    double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+
+    if(ask <= 0 || bid <= 0)
+    {
+        Print("Error: Invalid price for ", symbol);
+        return;
+    }
+
+    //--- Enhanced volume validation for volatility indices
+    double minVolume = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+    double maxVolume = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+    double volumeStep = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+
+    //--- Calculate stop loss distance for dynamic sizing
+    double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+    long stopLevel = SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL);
+    double minStopDistance = (double)stopLevel * point;
+
+    //--- For volatility indices, use much larger stop distances
+    double volatilityMultiplier = 3.0; // Moderate multiplier for volatility indices
+    if(StringFind(symbol, "Volatility") >= 0 || StringFind(symbol, "Crash") >= 0 || StringFind(symbol, "Boom") >= 0)
+    {
+        volatilityMultiplier = 5.0; // Moderate distance for synthetic indices
+    }
+
+    //--- Calculate minimum required distances with aggressive multipliers
+    double requiredStopDistance = MathMax(minStopDistance * 3.0, InpStopLoss * point * volatilityMultiplier);
+
+    //--- Use symbol-specific lot size
+    double volume = GetLotSize(symbol);
+    Print("Lot size for ", symbol, ": ", volume);
+    
+    //--- Basic volume validation
+    //--- Round to volume step
+    volume = MathRound(volume / volumeStep) * volumeStep;
+
+    //--- Ensure within min/max bounds
+    if(volume < minVolume)
+    {
+        volume = minVolume;
+        Print("Volume adjusted to minimum: ", volume, " for ", symbol);
+    }
+    if(volume > maxVolume)
+    {
+        volume = maxVolume;
+        Print("Volume adjusted to maximum: ", volume, " for ", symbol);
+    }
+
+    //--- Calculate stop loss and take profit with enhanced validation
+    //--- Use the already calculated requiredStopDistance from volume section
+    double requiredTakeProfitDistance = MathMax(minStopDistance * 3.0, InpTakeProfit * point * volatilityMultiplier);
+
+    //--- Calculate stop loss and take profit with enhanced distances
+    double stopLoss = bid + requiredStopDistance;
+    double takeProfit = bid - requiredTakeProfitDistance;
+
+    //--- Apply fixed Risk:Reward (e.g., 1:2) if enabled
+    if(InpUseFixedRiskReward)
+    {
+        double riskDistance = stopLoss - bid;
+        double rewardDistance = riskDistance * InpRiskRewardReward;
+        takeProfit = bid - rewardDistance;
+    }
+    
+    //--- Additional validation for volatility indices
+    if(StringFind(symbol, "Volatility") >= 0)
+    {
+        // Ensure minimum 50 point distance for volatility indices
+        double minVolatilityDistance = 50.0 * point;
+        if(stopLoss - bid < minVolatilityDistance)
+        {
+            stopLoss = bid + minVolatilityDistance;
+            Print("Stop Loss enhanced for volatility index: ", stopLoss, " for ", symbol);
+        }
+        if(bid - takeProfit < minVolatilityDistance)
+        {
+            takeProfit = bid - minVolatilityDistance;
+            Print("Take Profit enhanced for volatility index: ", takeProfit, " for ", symbol);
+        }
+    }
+    
+    //--- Final validation - ensure stops are far enough
+    double finalMinDistance = MathMax(minStopDistance * 5.0, 100.0 * point);
+    if(stopLoss - bid < finalMinDistance)
+    {
+        stopLoss = bid + finalMinDistance;
+        Print("Stop Loss final validation: ", stopLoss, " for ", symbol);
+    }
+    if(bid - takeProfit < finalMinDistance)
+    {
+        takeProfit = bid - finalMinDistance;
+        Print("Take Profit final validation: ", takeProfit, " for ", symbol);
+    }
+    
+    //--- Prepare trade request
+    MqlTradeRequest request = {};
+    MqlTradeResult result = {};
+    
+    request.action = TRADE_ACTION_DEAL;
+    request.symbol = symbol;
+    request.volume = volume;
+    request.type = ORDER_TYPE_SELL;
+    request.price = bid;
+    request.sl = stopLoss;
+    request.tp = takeProfit;
+    request.deviation = 10;
+    request.magic = InpMagicNumber;
+    request.comment = "Fxdaddy SELL";
+    request.type_time = ORDER_TIME_GTC;
+    request.type_filling = ORDER_FILLING_FOK;
+
+    //--- Execute trade
+    if(OrderSend(request, result))
+    {
+        if(result.retcode == TRADE_RETCODE_DONE)
+        {
+            Print("SELL trade executed: ", symbol, " Lot: ", volume, " Price: ", bid);
+        }
+        else
+        {
+            Print("SELL trade failed: ", symbol, " Error: ", result.retcode, " Comment: ", result.comment);
+        }
+    }
+    else
+    {
+        Print("SELL trade error: ", symbol, " Error: ", GetLastError());
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Process trailing stops                                           |
+//+------------------------------------------------------------------+
+void ProcessTrailingStops()
+{
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if(PositionGetTicket(i) > 0)
+        {
+            if(PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+            {
+                string symbol = PositionGetString(POSITION_SYMBOL);
+                double currentPrice = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 
+                                     SymbolInfoDouble(symbol, SYMBOL_BID) : 
+                                     SymbolInfoDouble(symbol, SYMBOL_ASK);
+                
+                double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+                double currentSL = PositionGetDouble(POSITION_SL);
+                double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+                
+                ulong ticket = PositionGetTicket(i);
+                if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+                {
+                    double newSL = currentPrice - InpTrailingStop * point;
+                    if(newSL > currentSL && newSL > openPrice)
+                    {
+                        ModifyPosition(ticket, symbol, newSL, PositionGetDouble(POSITION_TP));
+                    }
+                }
+                else if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
+                {
+                    double newSL = currentPrice + InpTrailingStop * point;
+                    if((newSL < currentSL || currentSL == 0) && newSL < openPrice)
+                    {
+                        ModifyPosition(ticket, symbol, newSL, PositionGetDouble(POSITION_TP));
+                    }
+                }
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Modify position                                                  |
+//+------------------------------------------------------------------+
+void ModifyPosition(ulong ticket, string symbol, double sl, double tp)
+{
+    //--- Get position type to determine validation
+    if(!PositionSelectByTicket(ticket))
+    {
+        Print("ModifyPosition: Cannot select position ", ticket);
+        return;
+    }
+
+    ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+    double currentPrice = (posType == POSITION_TYPE_BUY) ?
+                         SymbolInfoDouble(symbol, SYMBOL_BID) :
+                         SymbolInfoDouble(symbol, SYMBOL_ASK);
+
+    //--- Validate stop levels
+    double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+    long stopLevel = SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL);
+    double minStopDistance = (double)stopLevel * point;
+
+    bool slValid = true;
+    if(posType == POSITION_TYPE_BUY)
+    {
+        if(sl >= currentPrice - minStopDistance)
+            slValid = false;
+    }
+    else // SELL
+    {
+        if(sl <= currentPrice + minStopDistance)
+            slValid = false;
+    }
+
+    if(!slValid)
+    {
+        Print("ModifyPosition: Invalid SL ", sl, " for ", symbol, " (too close to current price ", currentPrice, ")");
+        return;
+    }
+
+    //--- Validate take profit if set
+    if(tp != 0.0)
+    {
+        bool tpValid = true;
+        if(posType == POSITION_TYPE_BUY)
+        {
+            if(tp <= currentPrice + minStopDistance)
+                tpValid = false;
+        }
+        else // SELL
+        {
+            if(tp >= currentPrice - minStopDistance)
+                tpValid = false;
+        }
+
+        if(!tpValid)
+        {
+            Print("ModifyPosition: Invalid TP ", tp, " for ", symbol, " (too close to current price ", currentPrice, ")");
+            return;
+        }
+    }
+
+    MqlTradeRequest request = {};
+    MqlTradeResult result = {};
+
+    request.action = TRADE_ACTION_SLTP;
+    request.position = ticket;
+    request.symbol = symbol;
+    request.sl = sl;
+    request.tp = tp;
+    request.magic = InpMagicNumber;
+
+    if(OrderSend(request, result))
+    {
+        if(result.retcode == TRADE_RETCODE_DONE)
+        {
+            Print("Position modified: ", symbol, " New SL: ", sl, " New TP: ", tp);
+        }
+        else
+        {
+            Print("ModifyPosition failed: ", symbol, " Error: ", result.retcode, " Comment: ", result.comment);
+        }
+    }
+    else
+    {
+        Print("ModifyPosition error: ", symbol, " Error: ", GetLastError());
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Expert timer function                                             |
+//+------------------------------------------------------------------+
+void OnTimer()
+{
+    //--- Update daily profit calculation
+    CalculateDailyProfit();
+    
+    //--- Test BTA indicators once after initialization (non-critical)
+    static bool btaTested = false;
+    if(!btaTested)
+    {
+        TestBTAIndicators();
+        btaTested = true;
+    }
+    
+    //--- Print comprehensive status every 5 minutes
+    static datetime lastStatusTime = 0;
+    if(TimeLocal() - lastStatusTime >= 300)
+    {
+        PrintComprehensiveStatus();
+        lastStatusTime = TimeLocal();
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Print comprehensive status report                                |
+//+------------------------------------------------------------------+
+void PrintComprehensiveStatus()
+{
+    Print("📊 ========== FXDADDY COMPREHENSIVE STATUS ==========");
+    Print("⏰ Time: ", TimeToString(TimeLocal(), TIME_DATE|TIME_MINUTES));
+    
+    //--- Trading Status
+    if(g_stopTrading)
+    {
+        Print("🚫 TRADING STATUS: STOPPED");
+        Print("   Reason: Risk management triggered");
+    }
+    else
+    {
+        Print("✅ TRADING STATUS: ACTIVE");
+    }
+    
+    //--- Position Information
+    int currentPositions = GetCurrentPositions();
+    Print("📈 POSITIONS: ", currentPositions, "/", InpMaxTrades, " (", (currentPositions * 100 / InpMaxTrades), "% capacity)");
+    
+    //--- Daily P&L Information
+    CalculateDailyProfit();
+    double dailyLimitPercent = (MathAbs(g_dailyProfit) / InpDailyLossLimit) * 100.0;
+    Print("💰 DAILY P&L: $", DoubleToString(g_dailyProfit, 2), " (", DoubleToString(dailyLimitPercent, 1), "% of limit)");
+    
+    //--- Risk Management Status
+    Print("🛡️ RISK MANAGEMENT:");
+    Print("   Consecutive Losses: ", g_consecutiveLosses, "/", InpMaxConsecutiveLosses);
+    Print("   Max Drawdown: ", DoubleToString(g_maxDrawdownReached, 2), "%/", InpMaxDrawdownPercent, "%");
+    Print("   High Loss Triggered: ", g_highLossTriggered ? "Yes" : "No");
+    
+    //--- Account Information
+    double accountBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+    double accountEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+    double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+    double currentDrawdown = ((g_initialBalance - accountBalance) / g_initialBalance) * 100.0;
+    
+    Print("💳 ACCOUNT STATUS:");
+    Print("   Balance: $", DoubleToString(accountBalance, 2));
+    Print("   Equity: $", DoubleToString(accountEquity, 2));
+    Print("   Free Margin: $", DoubleToString(freeMargin, 2));
+    Print("   Current Drawdown: ", DoubleToString(currentDrawdown, 2), "%");
+    
+    //--- Input Parameters Status
+    Print("⚙️ INPUT PARAMETERS:");
+    Print("   Lot Size: ", InpLotSize);
+    Print("   Daily Loss Limit: $", InpDailyLossLimit);
+    Print("   Max Loss Per Trade: $", InpMaxLossPerTrade);
+    Print("   Stop Loss: ", InpStopLoss, " pips");
+    Print("   Take Profit: ", InpTakeProfit, " pips");
+    
+    //--- Trading Symbols
+    Print("📋 TRADING SYMBOLS: ", ArraySize(g_tradingSymbols), " selected");
+    
+    Print("==================================================");
+}

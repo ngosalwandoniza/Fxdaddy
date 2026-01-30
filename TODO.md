@@ -1,0 +1,8 @@
+- [x] Update risk management inputs: Daily loss to $50, max loss per trade to $5, cooldown to 120 min, max trades to 5
+- [x] Modify CheckBTASignals() to accept sell signals inside zones if aligned or with lower strength
+- [x] Enable sniper-only sells when zones are active but misaligned
+- [x] Add partial position closure at 10% drawdown in CheckAdvancedRiskManagement()
+- [x] Implement profit scaling: Close 50% at 1:1 RR in ExecuteBuyTrade/ExecuteSellTrade
+- [x] Lower emergency stop threshold to $25
+- [x] Add daily profit target check (stop if profit reaches 5% of daily loss limit)
+- [x] Update ExecuteBuyTrade and ExecuteSellTrade to use GetLotSize(symbol) for symbol-specific lot sizes
